@@ -103,6 +103,12 @@ export async function saveRemoteMcpManualHeaders(
   });
 }
 
+export async function getRemoteMcpManualHeaders(
+  endpointUrl: string,
+): Promise<Record<string, string>> {
+  return (await readCredentials(endpointUrl)).manualHeaders;
+}
+
 export async function saveRemoteMcpOAuthTokens(
   endpointUrl: string,
   oauth: RemoteMcpOAuthTokens,
