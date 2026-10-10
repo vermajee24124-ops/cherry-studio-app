@@ -22,9 +22,6 @@ type StoredCredentials = {
 
 function normalizeEndpoint(endpointUrl: string): string {
   const endpoint = new URL(endpointUrl.trim());
-  if (endpoint.protocol !== 'https:' && endpoint.hostname !== 'localhost' && endpoint.hostname !== '127.0.0.1') {
-    throw new Error('MCP credentials may only be used with HTTPS endpoints, except localhost.');
-  }
   endpoint.hash = '';
   return endpoint.toString();
 }
@@ -89,6 +86,16 @@ export async function saveRemoteMcpManualHeaders(
   endpointUrl: string,
   headers: Record<string, string>,
 ): Promise<void> {
+  const endpoint = new URL(endpointUrl);
+  if (
+    Object.keys(headers).length > 0 &&
+    endpoint.protocol !== 'https:' &&
+    endpoint.hostname !== 'localhost' &&
+    endpoint.hostname !== '127.0.0.1' &&
+    endpoint.hostname !== '[::1]'
+  ) {
+    throw new Error('Manual credentials require an HTTPS endpoint, except for localhost.');
+  }
   const current = await readCredentials(endpointUrl);
   await writeCredentials(endpointUrl, {
     ...current,
