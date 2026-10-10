@@ -24,6 +24,7 @@ import { PluginError } from '@/shared/contracts/plugins';
 import { loggerService } from '@/shared/core/logger/LoggerService';
 import type { McpServer } from '@/shared/data/types/mcpServer';
 import type { PluginId } from '@/shared/data/types/plugin';
+import { getRemoteMcpHeaders } from '@/shared/services/remoteMcpCredentials';
 import { isSameMcpConnectionConfig, normalizeMcpHeaders } from '@/shared/utils/mcpConnectionConfig';
 
 import type { TraceRecorder } from '../observability';
@@ -177,7 +178,7 @@ async function listAllTools(
 
 /** On failure — including an aborted initialize — the SDK closes its own
  * transport before rethrowing, so callers never inherit a half-open client. */
-function createMcpClient(
+async function createMcpClient(
   config: McpRuntimeConnectionConfig,
   signal: AbortSignal,
   pluginAuthorizations: PluginAuthorizationManager,
@@ -190,7 +191,10 @@ function createMcpClient(
       pluginAuthorizations,
     );
   }
-  const headers = normalizeMcpHeaders(config.headers);
+  // Credentials are resolved from device-protected storage at connection time.
+  // The SQLite row contains only endpoint/configuration metadata for new servers.
+  const secureHeaders = await getRemoteMcpHeaders(config.endpointUrl, config.headers);
+  const headers = normalizeMcpHeaders(secureHeaders);
   return createMCPClient({
     clientName: 'Cherry Studio',
     initializationOptions: { signal },
