@@ -9,9 +9,9 @@ import {
 } from '@cherrystudio/ui/components';
 import { resolveProviderIcon } from '@cherrystudio/ui/icons';
 import { Redirect, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import { type ReactNode, useCallback, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Text, View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
 import { useUniwind } from 'uniwind';
 
 import { RouteHeader, type HeaderToolbarAction } from '@/frontend/appShell/header';
@@ -25,10 +25,17 @@ import {
 import type { McpServerRuntimeSummary } from '@/shared/contracts';
 import { loggerService } from '@/shared/core/logger/LoggerService';
 import { DataApiError, ErrorCode } from '@/shared/data/api/errors';
+import {
+  deleteRemoteMcpCredentials,
+  getRemoteMcpHeaders,
+  getRemoteMcpManualHeaders,
+  saveRemoteMcpManualHeaders,
+} from '@/shared/services/remoteMcpCredentials';
 import type { McpServer } from '@/shared/data/types/mcpServer';
 
 import { PluginPage } from '../components/PluginPage';
 import { McpToolsSection } from './components/McpToolsSection';
+import { startOAuthFlow } from './OAuthManager';
 import { parseMcpHeaders, serializeMcpHeaders } from './mcpHeaders';
 
 const logger = loggerService.withContext('McpServerScreen');
@@ -133,6 +140,9 @@ function McpServerEditor({ server, serverId }: { server?: McpServer; serverId?: 
 
   const [form, setForm] = useState<McpServerFormState>(() => createFormState(server));
   const [isSaving, setIsSaving] = useState(false);
+  const [isOAuthConnecting, setIsOAuthConnecting] = useState(false);
+  const [showManualHeaders, setShowManualHeaders] = useState(false);
+  const [savedSecureHeaders, setSavedSecureHeaders] = useState('');
   // Discovery can outlast the user's patience; once they leave, going back would pop their next page.
   const isFocused = useRef(false);
   useFocusEffect(
@@ -144,11 +154,32 @@ function McpServerEditor({ server, serverId }: { server?: McpServer; serverId?: 
     }, []),
   );
   const savedForm = createFormState(server);
+  const baselineHeaders = savedForm.headers || savedSecureHeaders;
   const isDirty =
     isCreating ||
     form.name !== savedForm.name ||
     form.endpointUrl !== savedForm.endpointUrl ||
-    form.headers !== savedForm.headers;
+    form.headers !== baselineHeaders;
+
+  useEffect(() => {
+    if (!serverId || !server?.endpointUrl) return;
+    let active = true;
+    void getRemoteMcpManualHeaders(server.endpointUrl).then((headers) => {
+      if (!active) return;
+      const serialized = serializeMcpHeaders(headers);
+      setSavedSecureHeaders(serialized);
+      if (!server.headers || Object.keys(server.headers).length === 0) {
+        setForm((current) =>
+          current.endpointUrl === server.endpointUrl && !current.headers
+            ? { ...current, headers: serialized }
+            : current,
+        );
+      }
+    }).catch(() => {
+      // Secure storage may be unavailable on a locked device; save remains usable.
+    });
+    return () => { active = false; };
+  }, [server?.endpointUrl, server?.headers, serverId]);
 
   const updateField = useCallback(
     <TKey extends keyof McpServerFormState>(key: TKey, value: McpServerFormState[TKey]) => {
@@ -166,17 +197,26 @@ function McpServerEditor({ server, serverId }: { server?: McpServer; serverId?: 
 
     try {
       setIsSaving(true);
+      if (server?.endpointUrl && server.endpointUrl !== dto.value.endpointUrl) {
+        await deleteRemoteMcpCredentials(server.endpointUrl);
+      }
+      // The server record stores configuration only. Static credentials stay in SecureStore.
+      await saveRemoteMcpManualHeaders(dto.value.endpointUrl, dto.value.headers);
+      const safeValue = { ...dto.value, headers: {} };
+
       if (serverId) {
-        await updateServer(serverId, dto.value);
-        // Show the stored values, including a name filled in from the endpoint.
-        setForm({ ...dto.value, headers: serializeMcpHeaders(dto.value.headers) });
+        await updateServer(serverId, safeValue);
+        const serialized = serializeMcpHeaders(dto.value.headers);
+        setSavedSecureHeaders(serialized);
+        setForm({ ...dto.value, headers: serialized });
       } else {
+        const headers = await getRemoteMcpHeaders(dto.value.endpointUrl, dto.value.headers);
         const serverInfo = await mcp.getServerInfo({
           endpointUrl: dto.value.endpointUrl,
-          headers: dto.value.headers,
+          headers,
         });
         const name = serverInfo.title?.trim() || serverInfo.name.trim() || dto.value.name;
-        await createServer({ ...dto.value, isEnabled: true, name });
+        await createServer({ ...safeValue, isEnabled: true, name });
         // The new server joins the Plugins page's MCP group; opening it from there edits it.
         if (isFocused.current) router.back();
       }
@@ -186,7 +226,35 @@ function McpServerEditor({ server, serverId }: { server?: McpServer; serverId?: 
     } finally {
       setIsSaving(false);
     }
-  }, [alert, createServer, form, mcp, router, serverId, t, toast, updateServer]);
+  }, [alert, createServer, form, mcp, router, server, serverId, t, toast, updateServer]);
+
+  const handleOAuthConnect = useCallback(async () => {
+    const endpointUrl = form.endpointUrl.trim();
+    if (!endpointUrl) {
+      alert.show({ title: t('settings.mcp.fields.endpointUrlInvalid') });
+      return;
+    }
+    try {
+      setIsOAuthConnecting(true);
+      await startOAuthFlow(endpointUrl);
+      toast.show({
+        label: 'OAuth connected. Tokens are stored locally on this device.',
+        variant: 'success',
+      });
+      if (serverId && server?.isEnabled) {
+        // Retire the already-connected client so its next connection reads the new local token.
+        await updateServer(serverId, { isEnabled: false });
+        await updateServer(serverId, { isEnabled: true });
+      }
+    } catch (error) {
+      toast.show({
+        label: error instanceof Error ? error.message : 'OAuth connection failed.',
+        variant: 'danger',
+      });
+    } finally {
+      setIsOAuthConnecting(false);
+    }
+  }, [alert, form.endpointUrl, server, serverId, t, toast, updateServer]);
 
   const handleToggleServer = useCallback(async () => {
     if (!serverId || !server) {
@@ -229,6 +297,7 @@ function McpServerEditor({ server, serverId }: { server?: McpServer; serverId?: 
       return;
     }
 
+    if (server?.endpointUrl) void deleteRemoteMcpCredentials(server.endpointUrl);
     const deletion = deleteServer(serverId);
     router.back();
     void deletion
@@ -239,7 +308,7 @@ function McpServerEditor({ server, serverId }: { server?: McpServer; serverId?: 
         logger.error('Failed to delete MCP server', error as Error);
         toast.show({ label: t('settings.mcp.toast.deleteFailed'), variant: 'danger' });
       });
-  }, [deleteServer, router, serverId, t, toast]);
+  }, [deleteServer, router, server, serverId, t, toast]);
 
   const isBusy = isSaving || isCreateMutationPending || isUpdating;
   const serverActions = useMemo<HeaderToolbarAction[] | undefined>(
@@ -337,17 +406,15 @@ function McpServerEditor({ server, serverId }: { server?: McpServer; serverId?: 
           </View>
         </View>
         <View className="gap-4">
-          {!isCreating ? (
-            <FormField label={t('settings.mcp.fields.name')}>
-              <Input
-                accessibilityLabel={t('settings.mcp.fields.name')}
-                autoCorrect={false}
-                onChangeText={(value) => updateField('name', value)}
-                placeholder={t('settings.mcp.fields.name')}
-                value={form.name}
-              />
-            </FormField>
-          ) : null}
+          <FormField label="Server Name">
+            <Input
+              accessibilityLabel="Server Name"
+              autoCorrect={false}
+              onChangeText={(value) => updateField('name', value)}
+              placeholder="Enter server name / platform name"
+              value={form.name}
+            />
+          </FormField>
           <FormField label={t('settings.mcp.fields.endpointUrl')}>
             <Input
               accessibilityLabel={t('settings.mcp.fields.endpointUrl')}
@@ -362,22 +429,45 @@ function McpServerEditor({ server, serverId }: { server?: McpServer; serverId?: 
               <Text className="text-warning text-xs">{t('settings.mcp.fields.httpWarning')}</Text>
             ) : null}
           </FormField>
-          <FormField label={t('settings.mcp.fields.headers')}>
-            <Input
-              accessibilityLabel={t('settings.mcp.fields.headers')}
-              autoCapitalize="none"
-              autoCorrect={false}
-              multiline
-              onChangeText={(value) => updateField('headers', value)}
-              placeholder={t('settings.mcp.fields.headersPlaceholder')}
-              spellCheck={false}
-              textAlignVertical="top"
-              value={form.headers}
-            />
-            <Text className="text-muted-foreground text-xs">
-              {t('settings.mcp.fields.headersHint')}
+          <Button
+            disabled={!form.endpointUrl.trim() || isOAuthConnecting || isBusy}
+            loading={isOAuthConnecting}
+            onPress={() => void handleOAuthConnect()}
+            variant="secondary"
+          >
+            Connect via OAuth
+          </Button>
+          <Text className="text-muted-foreground text-xs">
+            Static credentials and OAuth tokens are stored locally on this device only.
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ expanded: showManualHeaders }}
+            onPress={() => setShowManualHeaders((visible) => !visible)}
+            className="py-1"
+          >
+            <Text className="text-sm text-muted-foreground">
+              {showManualHeaders ? '▾' : '▸'} Advanced: Manual Headers
             </Text>
-          </FormField>
+          </Pressable>
+          {showManualHeaders ? (
+            <FormField label={t('settings.mcp.fields.headers')}>
+              <Input
+                accessibilityLabel={t('settings.mcp.fields.headers')}
+                autoCapitalize="none"
+                autoCorrect={false}
+                multiline
+                onChangeText={(value) => updateField('headers', value)}
+                placeholder="Authorization=Bearer token\nX-API-Key=token"
+                spellCheck={false}
+                textAlignVertical="top"
+                value={form.headers}
+              />
+              <Text className="text-muted-foreground text-xs">
+                Credentials are saved locally on this device only.
+              </Text>
+            </FormField>
+          ) : null}
         </View>
         {server ? (
           <McpToolsSection isDisabled={isBusy} onToggleTool={handleToggleTool} server={server} />

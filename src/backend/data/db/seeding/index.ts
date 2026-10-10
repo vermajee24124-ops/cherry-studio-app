@@ -1,5 +1,6 @@
 import type { DbService } from '../DbService';
 import { PreferenceSeeder } from './seeders/PreferenceSeeder';
+import { SuperAgentSeeder } from './seeders/SuperAgentSeeder';
 import { PresetProviderSeeder } from './seeders/PresetProviderSeeder';
 import { SeedRunner } from './SeedRunner';
 import type { DatabaseSeeder } from './types';
@@ -9,5 +10,5 @@ export async function seedDatabase(dbService: DbService) {
 }
 
 function createSeeders(): DatabaseSeeder[] {
-  return [new PreferenceSeeder(), new PresetProviderSeeder()];
+  return [new PreferenceSeeder(), new PresetProviderSeeder(), new SuperAgentSeeder()];
 }
